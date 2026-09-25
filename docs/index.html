@@ -18,13 +18,22 @@ section{padding:55px 0;border-top:1px solid var(--line)}h2{font-size:32px;margin
 code,pre{font-family:var(--mono)}code{color:var(--accent)}pre{overflow:auto;background:#05070a;border:1px solid var(--line);padding:18px;border-radius:12px;color:#cbd5e1}
 .note{padding:17px 20px;border-radius:12px;background:#0b1118;border:1px solid var(--line);color:var(--muted)}footer{padding:55px 0;color:var(--muted);text-align:center;border-top:1px solid var(--line)}footer strong{color:var(--text)}
 @media(max-width:760px){nav a{display:none}.grid,.stats{grid-template-columns:1fr}.hero{padding-top:60px}.hero h1{font-size:48px}}
+<style>
+body:after{content:"";position:fixed;inset:0;pointer-events:none;z-index:999;background:repeating-linear-gradient(0deg,rgba(255,255,255,.015) 0,rgba(255,255,255,.015) 1px,transparent 2px,transparent 4px);mix-blend-mode:screen}
+.hero{position:relative;overflow:hidden}.hero:before{content:"";position:absolute;width:520px;height:520px;right:-220px;top:-180px;border-radius:50%;background:radial-gradient(circle,#7dd3fc12,transparent 65%);animation:pulse 5s ease-in-out infinite}.hero>*{position:relative;z-index:1}
+@keyframes pulse{50%{transform:scale(1.15);opacity:.6}}@keyframes glitch{0%,92%,100%{transform:none;text-shadow:none}93%{transform:translate(-2px,1px);text-shadow:2px 0 #7dd3fc}94%{transform:translate(2px,-1px);text-shadow:-2px 0 #a78bfa}95%{transform:none}}
+.hero h1{animation:glitch 7s infinite}.hero h1:after{content:"_";color:#7dd3fc;animation:blink 1s steps(1) infinite}.term{font-family:var(--mono);font-size:13px;line-height:1.9}.termbar{font-family:var(--mono)}.terminal{position:relative;box-shadow:0 0 35px #7dd3fc0a}.terminal:after{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:#7dd3fc;box-shadow:0 0 15px #7dd3fc;animation:scan 3s linear infinite}@keyframes scan{0%{top:0;opacity:.1}50%{opacity:1}100%{top:100%;opacity:.1}}
+.card{transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}.card:hover{transform:translateY(-4px);border-color:#7dd3fc55;box-shadow:0 12px 35px #0008}
 </style>
+<script>
+document.addEventListener("DOMContentLoaded",()=>{const t=document.querySelector(".term");if(!t)return;const lines=["[BOOT] initializing research console...","[OK] V8 runtime connected","[OK] WebNN / LiteRT evidence loaded","[OK] XNNPACK case loaded","[INFO] analyzing invariants...","[READY] root-cause archive online"];t.innerHTML="";let i=0;function add(){if(i<lines.length){const d=document.createElement("div");d.textContent=lines[i++];d.style.opacity="0";t.appendChild(d);requestAnimationFrame(()=>d.style.transition="opacity .35s",d.style.opacity="1");setTimeout(add,260)}}add()});
+</script></style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap"><div class="terminal"><div class="termbar">hacr@v8-lab:~$ security-research --online</div><div class="term"></div></div>
 <nav><div class="brand"><span>V8</span> Security Notes</div><div><a href="#research">Research</a><a href="#method">Methodology</a><a href="https://github.com/hacrrrrrrr/v8-security-notes">GitHub</a></div></nav>
 
-<header class="hero"><div class="ey">HACR / INDEPENDENT SECURITY RESEARCH</div><h1>From crash to <span>root cause.</span></h1><p class="lead">A full technical research archive covering V8, WebNN, LiteRT, XNNPACK, optimized execution, String representations, pointer compression, the V8 Sandbox, Inspector protocol failures, ASan-driven analysis, and responsible vulnerability research.</p><div class="buttons"><a class="btn primary" href="#article">Read the article</a><a class="btn" href="https://github.com/hacrrrrrrr/v8-security-notes">Source on GitHub ↗</a></div><div class="claim"><strong>My research. My findings. My article. 😛</strong><br>Case studies are presented as the research record supplied by Hacr, with upstream issue references where available.</div></header>
+<header class="hero"><div class="ey">HACR / INDEPENDENT SECURITY RESEARCH</div><h1>From crash to <span>root cause.</span></h1><p class="lead">A full technical research archive covering V8, WebNN, LiteRT, XNNPACK, optimized execution, String representations, pointer compression, the V8 Sandbox, Inspector protocol failures, ASan-driven analysis, and responsible vulnerability research.</p><div class="buttons"><a class="btn primary" href="#research">Read the article</a><a class="btn" href="https://github.com/hacrrrrrrr/v8-security-notes">Source on GitHub ↗</a></div><div class="claim"><strong>My research. My findings. My article. 😛</strong><br>Case studies are presented as the research record supplied by Hacr, with upstream issue references where available.</div></header>
 
 <section id="research">
 <h2><small>01 / CASE STUDIES</small>Research archive</h2>
