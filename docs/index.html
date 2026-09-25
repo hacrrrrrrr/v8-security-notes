@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="V8 Security Notes — original security research, vulnerability analysis, root-cause investigations and proof-of-concepts by Hacr.">
+<title>V8 Security Notes — Hacr</title>
+<style>
+:root{--bg:#070a0f;--panel:#0d121a;--panel2:#111925;--text:#e8edf5;--muted:#91a0b5;--line:#1c2735;--accent:#7dd3fc;--accent2:#a78bfa;--good:#86efac;--warn:#fcd34d;--danger:#fb7185;--mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 80% 0%,#17203a 0,#070a0f 38%);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.65}.wrap{max-width:1120px;margin:auto;padding:0 24px}
+nav{height:72px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.brand{font-weight:800;letter-spacing:.3px}.brand span{color:var(--accent)}nav a{color:var(--muted);text-decoration:none;margin-left:22px;font-size:14px}nav a:hover{color:var(--text)}
+.hero{padding:92px 0 70px}.eyebrow{font-family:var(--mono);color:var(--accent);font-size:13px}.hero h1{font-size:clamp(42px,8vw,82px);line-height:.98;max-width:850px;margin:18px 0}.hero h1 em{font-style:normal;color:var(--accent2)}.hero p{max-width:760px;color:var(--muted);font-size:19px}.buttons{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}.btn{display:inline-block;padding:11px 17px;border:1px solid var(--line);border-radius:10px;color:var(--text);text-decoration:none;background:var(--panel)}.btn.primary{background:#e8edf5;color:#070a0f;border-color:#e8edf5;font-weight:700}
+.claim{margin:35px 0;padding:22px 24px;border-left:3px solid var(--accent2);background:rgba(167,139,250,.07);font-size:17px}.claim strong{color:#fff}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin:35px 0}.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:16px;padding:23px}.card h3{margin:0 0 7px}.card p{color:var(--muted);margin:0}.tag{display:inline-block;font:12px var(--mono);padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);margin:4px 4px 0 0}
+section{padding:55px 0;border-top:1px solid var(--line)}h2{font-size:32px;margin:0 0 12px}h2 small{font:13px var(--mono);color:var(--accent);display:block;margin-bottom:8px}section>p{color:var(--muted);max-width:800px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:25px 0}.stat{padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.stat b{font-size:28px;display:block}.stat span{font-size:13px;color:var(--muted)}
+.timeline{border-left:1px solid var(--line);margin:28px 0 0 8px}.item{position:relative;padding:0 0 30px 28px}.item:before{content:"";position:absolute;left:-5px;top:7px;width:9px;height:9px;border-radius:50%;background:var(--accent)}.item h3{margin:0}.item p{color:var(--muted);margin:5px 0}
+code,pre{font-family:var(--mono)}code{color:var(--accent)}pre{overflow:auto;background:#05070a;border:1px solid var(--line);padding:18px;border-radius:12px;color:#cbd5e1}
+.note{padding:17px 20px;border-radius:12px;background:#0b1118;border:1px solid var(--line);color:var(--muted)}footer{padding:55px 0;color:var(--muted);text-align:center;border-top:1px solid var(--line)}footer strong{color:var(--text)}
+@media(max-width:760px){nav a{display:none}.grid,.stats{grid-template-columns:1fr}.hero{padding-top:60px}.hero h1{font-size:48px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav><div class="brand"><span>V8</span> Security Notes</div><div><a href="#research">Research</a><a href="#method">Methodology</a><a href="https://github.com/hacrrrrrrr/v8-security-notes">GitHub</a></div></nav>
+
+<header class="hero">
+<div class="eyebrow">// independent security research</div>
+<h1>Finding the bug behind the <em>crash.</em></h1>
+<p>A living collection of V8 and WebNN security research: memory-safety investigations, native backend bugs, compiler and representation invariants, crash triage, PoCs, and root-cause analysis.</p>
+<div class="buttons"><a class="btn primary" href="#research">Explore the research</a><a class="btn" href="https://github.com/hacrrrrrrr/v8-security-notes">View source on GitHub ↗</a></div>
+<div class="claim"><strong>My research. My findings. My article. 😛</strong><br>These findings and PoCs are documented as my own research record. Upstream Chromium/V8 issue numbers are linked where applicable.</div>
+</header>
+
+<section id="research">
+<h2><small>01 / CASE STUDIES</small>Research archive</h2>
+<p>The archive deliberately separates fixed/disclosed findings from newer investigations. A crash is not automatically called memory corruption; every claim is tied to the evidence available.</p>
+<div class="grid">
+<div class="card"><h3>WebNN / LiteRT</h3><p><strong>STRIDED_SLICE integer overflow → OOB write</strong><br>Chromium issue 541043774. A tensor-dimension arithmetic invariant fails during constant folding.</p><span class="tag">fixed / disclosed</span><span class="tag">WebNN</span><span class="tag">LiteRT</span><span class="tag">ASan</span></div>
+<div class="card"><h3>WebNN / XNNPACK</h3><p><strong>Quantized unary fusion invalid free/reallocation</strong><br>Chromium issue 539052047. A temporary subgraph points into stack-backed node storage that later reaches reallocation.</p><span class="tag">fixed / disclosed</span><span class="tag">XNNPACK</span><span class="tag">ownership</span><span class="tag">ASan</span></div>
+<div class="card"><h3>V8 / Array.sort</h3><p><strong>Mutation during optimized comparator execution</strong><br>A Maglev-focused investigation into state changes while sorting is in progress.</p><span class="tag">investigation</span><span class="tag">Maglev</span><span class="tag">reentrancy</span></div>
+<div class="card"><h3>V8 / Array.join</h3><p><strong>Callback mutation and internal length validation</strong><br>Chromium issue 565916866. A debug CSA assertion exposes a post-callback invariant failure.</p><span class="tag">duplicate / investigation</span><span class="tag">Torque</span><span class="tag">reentrancy</span></div>
+<div class="card"><h3>V8 Inspector</h3><p><strong>CBOR → JSON serialization fatal check</strong><br>Chromium issue 565206586. Deep Runtime.evaluate input reaches Inspector response serialization and fails ConvertCBORToJSON.</p><span class="tag">investigation</span><span class="tag">Inspector</span><span class="tag">CDP</span></div>
+<div class="card"><h3>V8 Strings / wasm:js-string</h3><p><strong>Representation and optimized-tier research</strong><br>Research into externalized Strings, representation assumptions, pointer compression and sandbox invariants.</p><span class="tag">ongoing research</span><span class="tag">WebAssembly</span><span class="tag">Sandbox</span></div>
+</div>
+</section>
+
+<section id="method">
+<h2><small>02 / METHOD</small>From crash to root cause</h2>
+<p>The central question is not simply “did it crash?” It is “which invariant failed, where, and what does the evidence actually prove?”</p>
+<div class="timeline">
+<div class="item"><h3>01 — Reduce</h3><p>Build the smallest deterministic reproducer and record revision, architecture, flags and execution tier.</p></div>
+<div class="item"><h3>02 — Instrument</h3><p>Use ASan, debug assertions, debugger state and generated-code evidence to identify the first invalid operation.</p></div>
+<div class="item"><h3>03 — Trace the invariant</h3><p>Connect the JavaScript/API input to internal representation, native code, allocation, lifetime and memory access.</p></div>
+<div class="item"><h3>04 — Classify precisely</h3><p>Distinguish assertion failures, invalid frees, OOB reads/writes, type confusion and demonstrated primitives.</p></div>
+<div class="item"><h3>05 — Compare the fix</h3><p>For disclosed bugs, identify the upstream defensive change and build a regression test around the broken invariant.</p></div>
+</div>
+<pre>semantic value
+      ↓
+internal representation
+      ↓
+compiler / native specialization
+      ↓
+machine-level assumption
+      ↓
+memory or protocol operation
+      ↓
+security impact</pre>
+</section>
+
+<section>
+<h2><small>03 / PRINCIPLES</small>Evidence first</h2>
+<div class="grid">
+<div class="card"><h3>Crash ≠ primitive</h3><p>An ASan OOB report proves a memory-safety violation. It does not automatically prove arbitrary read/write or sandbox escape.</p></div>
+<div class="card"><h3>External ≠ bypass</h3><p>External memory can be legitimate. The security question is how the address or handle was produced and validated.</p></div>
+<div class="card"><h3>Callback ≠ stable state</h3><p>JavaScript callbacks can mutate observable state. Native algorithms must revalidate assumptions after reentrancy.</p></div>
+<div class="card"><h3>Ownership matters</h3><p>A pointer being readable does not mean it can safely be passed to realloc/free. Lifetime and ownership are separate invariants.</p></div>
+</div>
+</section>
+
+<section>
+<h2><small>04 / ARCHIVE</small>Full technical article</h2>
+<p>The complete long-form write-up contains the detailed case studies, PoCs supplied for the research record, root-cause methodology, ASan workflow, pointer-compression discussion, V8 Sandbox analysis, and reporting templates.</p>
+<div class="buttons"><a class="btn primary" href="https://github.com/hacrrrrrrr/v8-security-notes/blob/main/V8_SECURITY_RESEARCH.md">Read the full article ↗</a></div>
+</section>
+
+<footer>
+<p><strong>V8 Security Notes</strong> · Hacr</p>
+<p>Original research archive — documented for security research, debugging and responsible vulnerability analysis.</p>
+<p>My research. My findings. My article. 😛</p>
+</footer>
+</div>
+</body>
+</html>
