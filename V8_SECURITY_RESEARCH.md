@@ -2060,3 +2060,223 @@ What does the evidence prove?
 ~~~
 
 That is the bridge between beginner crash analysis and senior-level root-cause research.
+
+
+---
+
+# 45. V8 Inspector / CDP Serialization Crash
+
+**Issue:** Chromium issue 565206586
+
+**Status:** Reported issue; classify according to the upstream issue rather than assuming memory corruption.
+
+This case is different from the native memory-corruption examples above. The supplied reproducer reaches a V8 Inspector protocol serialization invariant and terminates the process through a fatal check.
+
+## Reproducer
+
+The supplied test constructs a deeply nested JavaScript expression and sends it through the Inspector Runtime.evaluate protocol:
+
+~~~javascript
+function receive(msg) {
+    print("Received: " + msg.length);
+}
+
+let obj = "1";
+
+for (let i = 0; i < 400; i++) {
+    obj = "[" + obj + "]";
+}
+
+send(
+  '{"id": 1, "method": "Runtime.evaluate", "params": ' +
+  '{"expression": "' + obj + '", "returnByValue": true}}'
+);
+~~~
+
+The important characteristic is the recursively constructed expression:
+
+~~~text
+1
+[1]
+[[1]]
+[[[1]]]
+...
+~~~
+
+with approximately 400 nesting levels.
+
+## Observed failure
+
+The supplied build terminates at:
+
+~~~text
+Fatal error in ../../src/inspector/v8-inspector-session-impl.cc, line 193
+Check failed: ConvertCBORToJSON(SpanFrom(cbor), &json).ok().
+~~~
+
+The relevant stack begins in:
+
+~~~text
+v8_inspector::V8InspectorSessionImpl::serializeForFrontend
+~~~
+
+and proceeds through the Inspector protocol response machinery:
+
+~~~text
+serializeForFrontend
+    |
+    v
+SendProtocolResponse
+    |
+    v
+DomainDispatcher::sendResponse
+    |
+    v
+Runtime::EvaluateCallbackImpl::sendSuccess
+    |
+    v
+V8RuntimeAgentImpl::evaluate
+    |
+    v
+Runtime::DomainDispatcherImpl::evaluate
+    |
+    v
+UberDispatcher::Dispatch
+    |
+    v
+V8InspectorSessionImpl::dispatchProtocolMessage
+~~~
+
+## Root-cause boundary
+
+The most useful observation is that the failure occurs after Runtime.evaluate has produced a protocol response and while the Inspector implementation is serializing that response for the frontend.
+
+The failing invariant is:
+
+~~~text
+internal Inspector/CRDT serialization
+        |
+        v
+CBOR representation
+        |
+        v
+ConvertCBORToJSON(...)
+        |
+        v
+conversion must succeed
+~~~
+
+Instead, `ConvertCBORToJSON(...)` returns a failure and the current implementation reaches a fatal `CHECK`.
+
+This makes the current evidence a **protocol serialization / validation failure**, not proof of an OOB write.
+
+## Why the nested expression matters
+
+The test does not require a large JavaScript payload in the ordinary sense. It creates a structurally deep expression.
+
+That distinction is useful:
+
+~~~text
+payload size
+     !=
+structural complexity
+~~~
+
+A serializer may be sensitive to:
+
+- nesting depth
+- recursive object structure
+- parser/AST depth
+- protocol representation limits
+- conversion limits
+- recursion limits
+- integer/length assumptions
+
+Therefore, when investigating this type of crash, measure both the byte length and structural depth of the generated input.
+
+## What the stack tells us
+
+The stack is especially valuable because it places the fatal check inside the Inspector session rather than inside the JavaScript engine's array/string/object memory-management code.
+
+The immediate failure boundary is:
+
+~~~text
+Inspector protocol response
+        |
+        v
+serializeForFrontend()
+        |
+        v
+ConvertCBORToJSON()
+        |
+        X
+CHECK failure
+~~~
+
+This narrows the investigation considerably.
+
+## Security classification
+
+Based on the supplied evidence alone:
+
+**Confirmed:**
+
+- a specially constructed Runtime.evaluate request reaches the Inspector;
+- the response serialization path is reached;
+- CBOR-to-JSON conversion fails;
+- a fatal CHECK terminates the process in the tested build.
+
+**Not demonstrated by this reproducer alone:**
+
+- heap out-of-bounds access;
+- stack corruption;
+- use-after-free;
+- arbitrary read/write;
+- type confusion;
+- code execution;
+- sandbox escape.
+
+This distinction is important because debug assertions and fatal checks can expose robustness bugs without necessarily establishing memory corruption.
+
+## Investigation checklist
+
+For a deeper root-cause analysis, compare:
+
+1. the exact V8 revision;
+2. debug vs. release builds;
+3. sanitizer builds;
+4. the smallest nesting depth that reproduces the failure;
+5. whether reducing nesting changes the CBOR representation;
+6. whether `ConvertCBORToJSON` reports a specific conversion error before the CHECK;
+7. whether the response object contains a malformed or unsupported protocol value;
+8. whether the same Runtime.evaluate request fails through a normal DevTools transport;
+9. whether the failure is specific to `returnByValue: true`;
+10. the upstream patch associated with issue 565206586.
+
+The key root-cause question is:
+
+> Why can a Runtime.evaluate response reach `serializeForFrontend()` in a state for which `ConvertCBORToJSON()` cannot produce valid JSON, and why is that conversion failure handled by a fatal CHECK?
+
+That is a much more precise starting point than labeling the crash as memory corruption before sanitizer evidence exists.
+
+## Research lesson
+
+This case adds another class to the repository's taxonomy:
+
+~~~text
+Memory-safety invariant
+        |
+        +-- bounds
+        +-- ownership
+        +-- representation
+        +-- lifetime
+        +-- reentrancy
+
+Protocol invariant
+        |
+        +-- valid serialization
+        +-- valid CBOR/JSON conversion
+        +-- response-state validation
+~~~
+
+A mature vulnerability research workflow should investigate both kinds of invariants while keeping their security impact separate.
